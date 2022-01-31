@@ -1,6 +1,8 @@
+from ast import BinOp
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Iterator, TypeVar
+from typing import Any, Callable, Iterator, Optional, TypeVar
+
 
 ### context free grammars
 
@@ -29,18 +31,33 @@ class Grammar:
     def productions_with_lhs(self, nts: NTS) -> list[Production]:
         return [ rule for rule in self.rules if rule.lhs == nts ]
 
+### abstract syntax for arithmetic expressions
+
+class AST: pass
+@dataclass
+class Binop(AST):
+    left: AST
+    binop: str
+    right: AST
+@dataclass
+class Var(AST):
+    name: str
+@dataclass
+class Constant(AST):
+    val: int
+
 ### an example grammar
 
 expr_grammar = Grammar(
     ['T', 'E', 'F'],
     ['x', '2', '(', ')', '+', '*'],
-    [Production('T', [NT('E')])
-    ,Production('T', [NT('T'), '+', NT('E')])
-    ,Production('E', [NT('F')])
-    ,Production('E', [NT('E'), '*', NT('F')])
-    ,Production('F', ['x'])
-    ,Production('F', ['2'])
-    ,Production('F', ['(', NT('T'), ')'])],
+    [Production('T', [NT('E')],               lambda e: e)
+    ,Production('T', [NT('T'), '+', NT('E')], lambda t, e: BinOp(t, '+', e))
+    ,Production('E', [NT('F')],               lambda f: f)
+    ,Production('E', [NT('E'), '*', NT('F')], lambda e, f: BinOp(e, '*', f))
+    ,Production('F', ['x'],                   lambda : Var('x'))
+    ,Production('F', ['2'],                   lambda : Constant(2))
+    ,Production('F', ['(', NT('T'), ')'],     lambda t: t)],
     'T'
 )
 expr_grammar_ = Grammar(
@@ -78,7 +95,35 @@ def td_parse(g: Grammar, alpha: list[Symbol], inp: list[TS]
 def parse_from_string(g: Grammar, s: str) -> Iterator[list[str]]:
     return td_parse(g, [NT(g.start)], list(s))
 
+### example parser for expr_grammar
 
+def td_parse_T(inp: str) -> Iterator[list[str]]:
+    # 1st production
+    yield from td_parse_E(inp)
+    # 2nd production
+    for inp1 in td_parse_T(inp):
+        if inp1[:1] == '+':
+            yield from td_parse_E(inp1[1:])
+
+def td_parse_E(inp: str) -> Iterator[list[str]]:
+    # 1st production
+    yield from td_parse_F(inp)
+    # 2nd production
+    for inp1 in td_parse_E(inp):
+        if inp1[:1] == '*':
+            yield from td_parse_F(inp1[1:])
+
+def td_parse_F(inp: str) -> Iterator[list[str]]:
+    match inp[:1]:
+        case 'x':
+            yield inp[1:]
+        case '2':
+            yield inp[1:]
+        case '(':
+            for rest_inp in td_parse_E(inp[1:]):
+                match rest_inp[:1]:
+                    case ')':
+                        yield rest_inp[1:]
 
 ### first sets for k=1
 # we represent first sets as a mapping
@@ -126,7 +171,7 @@ def update_first(g: Grammar, es: EmptySet, fs: FirstSet):
             fn = fn | first(es, fs, rule.rhs)
         fs[n] = fn
 
-def fixed_point(current_map: dict, update: Callable[[FirstSet], None]) -> dict:
+def fixed_point(current_map: dict, update: Callable[[dict], None]) -> dict:
     next_map = None
     while next_map is None or any(current_map[k] != next_map[k] for k in current_map):
         next_map = current_map
@@ -144,3 +189,118 @@ def calculate_first(g: Grammar, es: EmptySet) -> FirstSet:
 
 es = calculate_empty(expr_grammar_)
 fs = calculate_first(expr_grammar_, es)
+
+###
+
+class GrammarAnalysis:
+    ## abstract methods
+    def bottom(self) -> Any:
+        pass
+    def empty(self) -> Any:
+        pass
+    def singleton(self, term) -> Any:
+        pass
+    def join(self, x, y) -> Any:
+        pass
+    def concat(self, x, y) -> Any:
+        pass
+    def equal(self, x, y) -> bool:
+        pass
+
+    def initial_analysis(self, g: Grammar) -> dict[NTS]:
+        return { n : self.bottom() for n in g.nonterminals }
+    def rhs_analysis(self, fs: dict[NTS], alpha: list[Symbol]):
+        r = self.empty()
+        for sym in alpha:
+            match sym:
+                case NT(nt):
+                    r = self.concat(r, fs[nt])
+                case term:
+                    r = self.concat(r, self.singleton(term))
+        return r
+    def update_analysis(self, g: Grammar, fs: dict):
+        for rule in g.rules:
+            match rule:
+                case Production(nt, alpha):
+                    fs[nt] = self.join(self.rhs_analysis(fs, alpha), fs[nt])
+    def run(self, g: Grammar):
+        initial_map = self.initial_analysis(g)
+        update_map = partial(self.update_analysis, g)
+        return fixed_point(initial_map, update_map)
+
+
+@dataclass
+class First_K_Analysis (GrammarAnalysis):
+    k: int
+    def bottom(self):
+        return frozenset([])
+    def empty(self):
+        return frozenset({ "" })
+    def singleton(self, term):
+        return frozenset({ term })
+    def join(self, sl1, sl2):
+        return sl1 | sl2
+    def concat(self, x, y) -> Any:
+        return frozenset({ (sx+sy)[:self.k] for sx in x for sy in y })
+    def equal(self, x, y) -> bool:
+        return  x == y
+
+@dataclass
+class Follow_K_Analysis(First_K_Analysis):
+    first_k: dict
+
+    def initial_analysis(self, g: Grammar):
+        r = super().initial_analysis(g)
+        r[g.start] = self.empty()
+        return r
+
+    def update_analysis(self, g: Grammar, fs: dict):
+        for rule in g.rules:
+            match rule:
+                case Production(nt, alpha):
+                    for i in range(len(alpha)):
+                        match alpha[i]:
+                            case NT(n):
+                                rst = self.rhs_analysis(self.first_k, alpha[i+1:])
+                                fs[n] = self.join(fs[n], self.concat(rst, fs[nt]))
+
+### general first_1 analysis
+
+first1analysis = First_K_Analysis(1)
+first1 = first1analysis.run(expr_grammar_)
+
+### deterministic parser
+
+def accept(g: Grammar, k: int, inp: list[TS]) -> Optional[list[TS]]:
+    fika = First_K_Analysis(k)
+    first_k = fika.run(g)
+    foka = Follow_K_Analysis(k, first_k)
+    follow_k = foka.run(g)
+    def lookahead(rule: Production) -> frozenset[str]:
+        return fika.concat(fika.rhs_analysis(first_k,rule.rhs), follow_k[rule.lhs])
+    def accept_symbol(sym: Symbol, inp: list[TS]) -> Optional[list[TS]]:
+        match sym:
+            case NT(nt):
+                prefix = "".join(inp[:k])
+                candidates = [rule for rule in g.productions_with_lhs(nt) 
+                                   if prefix in lookahead(rule)]
+                if len(candidates) > 1:
+                    print("Grammar is not LL("+str(k)+")")
+                if len(candidates) > 0:
+                    return accept_list(candidates[0].rhs, inp)
+            case t:
+                if inp[:1] == [t]:
+                    return inp[1:]
+    def accept_list(alpha: list[Symbol], inp: list[TS]) -> Optional[list[TS]]:
+        for sym in alpha:
+            inp = accept_symbol(sym, inp)
+            if inp is None:
+                break
+        return inp
+
+    return accept_symbol(NT(g.start), inp)
+
+### convenience
+
+def accept_expr(inp: str) -> Optional[list[TS]]:
+    return accept(expr_grammar_, 1, list(inp))
