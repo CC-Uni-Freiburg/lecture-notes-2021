@@ -1,0 +1,9 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/Users/thiemann/.vscode/extensions/stefanwehr.write-your-python-program-0.17.1/python/src/"
+    ],
+    "python.linting.enabled": false,
+    "python.analysis.extraPaths": [
+        "/Users/thiemann/.vscode/extensions/stefanwehr.write-your-python-program-0.13.1/python/src/"
+    ]
+}
