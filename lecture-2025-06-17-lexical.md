@@ -31,7 +31,7 @@ The outer definition is *shadowed* by the `lambda x:`.
 
 Lexical scope is also known as *static* because we can figure
 the definition used at any point in the program by examining
-the syntax.
+the AST.
 
 ### Digression: Static scope vs. dynamic scope
 
@@ -49,19 +49,25 @@ What's printed by this program? `42`!
 An early version of Lisp used the last dynamically encountered
 definition of each variable:
 
-1. Evaluate `f(2)` -> `y := 4, x := 2, lambda z: x + y + z`
+1. Evaluate `f(2)` -> `x := 2, y = 4 | lambda z: x + y + z`
 2. Evaluate `g( 1, ...)` (referencing the above datastructure)
 3. Inside `g` we extend the datastructure to
-   `x := 1, y := 4, x := 2, lambda z: x + y + z`
+   `x := 2, y := 4, x := 1 | lambda z: x + y + z`
 4. Calling it with 36:
-   `z := 36, x := 1, y := 4, x := 2 | x + y + z`
+   `x := 2, y := 4, x := 1, z := 36 | x + y + z`
     result: `41`
 	
+Here, we write a closure as a pair of a list of variable assignments
+and an expression. New variable assignments are attached on the right.
+To look up the value of a variable, we search the assignments from
+right to left, which corresponds to the value we get by executing them
+from left to right.
+
 This is called *dynamic scope*. 
 Eliminated from Lisp because the behavior is hard to predict.
 Most languages nowadays use static scope. 
 Except emacs-lisp...
-
+<https://www.gnu.org/software/emacs/manual/html_node/elisp/Dynamic-Binding.html>
 
 ### Free variables
 
@@ -71,6 +77,7 @@ From the subexpression `x + y + z` we obtain `{x, y, z}` as free
 variables and `{z}` is the set of bound variables, so in total
 `{x, y, z} \ { z} = {x, y}`
 
+(see attached code)
 
 ### Closure representations: flat vs. nested
 
@@ -234,4 +241,53 @@ For the transformation, calculate
 1. the set of variables that occurs free in a lambda
 2. the set of variables that are assigned to
 
-Take the intersection of these sets: those are the candidaates for boxing.
+Take the intersection of these sets: those are the candidates for boxing.
+
+This choice is a conservative approximation.
+
+Improvement: if there is definitely no assignment to a variable after
+its capture in a closure, this variable does not have to be boxed.
+This property can be decided by a *data flow analysis*.
+
+### Implementation of free variables of an expression
+
+```python
+from ast_1_python import *
+from util.immutable_list import IList, ilist
+
+def free_variables(e: Expr) -> frozenset[Id]:
+    """
+    Calculate the free variables in an expression.
+    Do so in a functional way.
+    """
+    match e:
+        case EConst(_):
+            return frozenset()
+        case EVar(name):
+            return frozenset([name])
+        case EOp1(_, operand):
+            return free_variables(operand)
+        case EOp2(left, _, right):
+            return free_variables(left) | free_variables(right)
+        case EInput():
+            return frozenset()
+        case EIf(test, body, orelse):
+            return (free_variables(test) | 
+                    free_variables(body) | 
+                    free_variables(orelse))
+        case ETuple(es):
+            return frozenset().union(*(free_variables(ei) for ei in es))
+        case ETupleAccess(e, _):
+            return free_variables(e)
+        case ETupleLen(e):
+            return free_variables(e)
+        case ECall(func, args):
+            return (free_variables(func) | 
+                    frozenset().union(*(free_variables(arg) for arg in args)))
+        case ELambda(params, body):
+            bound_vars = frozenset(Id(param.name) for param in params)
+            free_vars = free_variables(body) - bound_vars
+            return free_vars
+        case EArity(func):
+            return free_variables(func)
+```
